@@ -6,12 +6,12 @@
 #include "MPU6050.h"
 #include <PID_v1.h>
 
-// =================== Wi-Fi ===================
+/* =================== Wi-Fi =================== */
 const char *SSID = "GG_TEP";
 const char *PASS = "lolaflorez&";
 WebServer server(80);
 
-// =================== Moteurs ===================
+/* =================== Moteurs =================== */
 #define L_FWD 25
 #define L_REV 26
 #define R_FWD 32
@@ -22,24 +22,24 @@ const int PWM_FREQ = 1000;
 const int MAX_PWM = (1 << PWM_BITS) - 1;
 const int MIN_PWM = 25;
 
-// =================== MPU & PID ===================
+/* =================== MPU & PID =================== */
 MPU6050 mpu;
 double setpoint = 0, input, output;
-double Kp = 80.0, Ki = 1.5, Kd = 1.0;
+double Kp = 145.0, Ki = 5.15, Kd = 0.4;
 PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
 float angle = 0, accAngle = 0, gyroRate = 0;
-float alpha = 0.98;
+float alpha = 0.995;
 unsigned long lastLoopMicros = 0;
-const unsigned long LOOP_PERIOD_US = 3000; // 3 ms → ~333 Hz
+const unsigned long LOOP_PERIOD_US = 3000; // 3 ms ≈ 333 Hz
 
 bool enabled = false;
 
-// =================== HTML ===================
+/* =================== HTML Interface =================== */
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>CMK Robot PID</title>
+<title>Robot Blalance </title>
 <style>
 body{margin:0;background:#0a0b0d;color:#fff;font-family:Segoe UI,Arial,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}
 .card{background:#15171a;padding:24px;border-radius:20px;box-shadow:0 8px 30px rgba(0,0,0,.6);width:90%;max-width:440px;text-align:center}
@@ -58,7 +58,6 @@ span.val{color:#2eff8e}
 <label>Ki: <span id="KiVal">--</span></label><input id="Ki" type="range" min="0" max="10" step="0.05">
 <label>Kd: <span id="KdVal">--</span></label><input id="Kd" type="range" min="0" max="10" step="0.05">
 <label>Alpha: <span id="AlVal">--</span></label><input id="Al" type="range" min="0.80" max="0.995" step="0.001">
-
 <div class="data">
 <b>Données en temps réel</b><br>
 Angle: <span id="a" class="val">--</span>°<br>
@@ -68,7 +67,6 @@ Gyro: <span id="g" class="val">--</span><br>
 État: <span id="st" class="val">--</span>
 </div>
 </div>
-
 <script>
 const vars=['Kp','Ki','Kd','Al'];
 async function getPID(){
@@ -98,22 +96,23 @@ getPID();
 </script></body></html>
 )rawliteral";
 
-// =================== Fonctions moteur ===================
+/* =================== Contrôle moteur =================== */
 void drive(int pwmL, int pwmR) {
   int dL = abs(pwmL), dR = abs(pwmR);
   if (dL < MIN_PWM) dL = 0;
   if (dR < MIN_PWM) dR = 0;
 
-  if (pwmL > 0) { ledcWrite(0, dL); ledcWrite(1, 0); }
-  else if (pwmL < 0) { ledcWrite(0, 0); ledcWrite(1, dL); }
+  // 🔁 Correction du sens (inversion)
+  if (pwmL > 0) { ledcWrite(0, 0); ledcWrite(1, dL); }   // inversé
+  else if (pwmL < 0) { ledcWrite(0, dL); ledcWrite(1, 0); }
   else { ledcWrite(0, 0); ledcWrite(1, 0); }
 
-  if (pwmR > 0) { ledcWrite(2, dR); ledcWrite(3, 0); }
-  else if (pwmR < 0) { ledcWrite(2, 0); ledcWrite(3, dR); }
+  if (pwmR > 0) { ledcWrite(2, 0); ledcWrite(3, dR); }   // inversé
+  else if (pwmR < 0) { ledcWrite(2, dR); ledcWrite(3, 0); }
   else { ledcWrite(2, 0); ledcWrite(3, 0); }
 }
 
-// =================== Web ===================
+/* =================== Web Handlers =================== */
 void handleRoot(){ server.send(200,"text/html",INDEX_HTML); }
 void handleToggle(){
   enabled = !enabled;
@@ -135,7 +134,7 @@ void handleStatus(){
   server.send(200,"application/json",json);
 }
 
-// =================== Setup ===================
+/* =================== Setup =================== */
 void setup() {
   Serial.begin(115200);
   Wire.begin();
@@ -149,7 +148,7 @@ void setup() {
   }
 
   pid.SetMode(AUTOMATIC);
-  pid.SetSampleTime(5); // 5 ms → 200 Hz (PID interne)
+  pid.SetSampleTime(5);
   pid.SetOutputLimits(-255, 255);
 
   ledcSetup(0, PWM_FREQ, PWM_BITS);
@@ -177,31 +176,44 @@ void setup() {
   Serial.println("Robot prêt à 333 Hz PID loop.");
 }
 
-// =================== Loop ===================
+/* =================== Loop =================== */
 void loop() {
   server.handleClient();
 
-  // synchroniser à 3 ms pour stabilité PID
+  // Boucle à fréquence fixe (~333 Hz)
   if ((micros() - lastLoopMicros) < LOOP_PERIOD_US) return;
   unsigned long now = micros();
-  float dt = (now - lastLoopMicros) / 1e6;
+  float dt = (now - lastLoopMicros) / 1e6;  // Δt en secondes
   lastLoopMicros = now;
 
+  // Lecture brute du MPU6050
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
+  // === ACCÉLÉROMÈTRE : angle absolu (mesure lente, mais stable) ===
+  // Calcul de l’angle de tangage (pitch) en degrés
   accAngle = atan2(-ax, az) * 180.0 / PI;
-  gyroRate = gy / 131.0;
-  angle = alpha * (angle + gyroRate * dt) + (1 - alpha) * accAngle;
+
+  // === GYROSCOPE : vitesse angulaire (rapide, mais bruitée et dérive) ===
+  gyroRate = (float)gy / 131.0;  // sensibilité ±250°/s → 131 LSB/(°/s)
+
+  // === FILTRE COMPLÉMENTAIRE (règle d’Euler) ===
+  // θ(t) = α * (θ(t - Δt) + ω * Δt) + (1 - α) * θ_acc
+  angle = alpha * (angle + gyroRate * dt) + (1.0 - alpha) * accAngle;
+
+  // Entrée PID = angle mesuré, consigne = 0°
   input = angle;
 
   pid.Compute();
 
+  // === Protection et zone neutre ===
   if (!enabled || fabs(angle) > 45) {
     drive(0, 0);
     return;
   }
 
+  // === Commande moteur ===
   int pwm = constrain((int)output, -255, 255);
-  drive(pwm, pwm);
+  drive(-pwm, -pwm); // inversion globale pour sens correct
 }
+
